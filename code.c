@@ -1,7 +1,16 @@
+/* NOTE -- NEW ACCESS CODE TO ADDRESS SOME ISSUES */
+
+
 #include <stdio.h>
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
 
 /* Program looks for files "DB6" and "DB6.idx" in the current directory */
 /* If you want to change the file names, look for them in the code.     */
+
+/* Note: this code works for the 6p-databases, but may require some	*/
+/* modifications for the 8p-databases.					*/
 
 /* Look at DB_BUFFERS to set the storage requirements you want to use.  */
 
@@ -61,6 +70,8 @@
 #define OPPNMOVE        2
 #define MOVEMADE        3
 
+#define	MAX_PIECES	12
+
 /* Back rank masks */
 #define WBACKR  0x01010101
 #define BBACKR  0x80808080
@@ -117,8 +128,8 @@ typedef DB_ELEM_T       *DB_VEC_PTR_T;
 #define DB_ELEM_SZ      sizeof(DB_ELEM_T)
 
 typedef struct sidxstr {
-        unsigned sidxbase  : 24;
-        unsigned sidxindex :  8;
+        unsigned sidxbase;
+        unsigned sidxindex;
 } sidxindex, * sidxindexptr;
 
 typedef struct {
@@ -127,7 +138,8 @@ typedef struct {
         long            firstBPIdx;
         long            nextBPIdx;
         long            numPos;
-        sidxindexptr    dbptr;
+        unsigned      * sidxbase;
+	unsigned char * sidxindex;
         unsigned char   nWP;
         unsigned char   nBP;
         unsigned char   nBK;
@@ -171,13 +183,13 @@ typedef struct db {
         unsigned char value;            /* Some dbs are all one value - if
                                            so this field is set to that value */
         unsigned short startbyte;       /* Byte where subdatabase starst */
-        unsigned long startaddr;        /* Position number at start byte */
-        unsigned long endaddr;          /* Ending address of db */
+        unsigned long  startaddr;       /* Position number at start byte */
+        unsigned long    endaddr;       /* Ending address of db */
         DB_REC_PTR_T db;                /* Pointer to index info */
 } DBENTRY, * DBENTRYPTR;
 
 /* bk X wk X bp X wp */
-#define DBTABLESIZE     ( 6 * 6 * 6 * 6 )
+#define DBTABLESIZE     ( 1 << 16 )
 
 /* Given the number w/b kings and checkers (pawns), DBINDEX gives us    */
 /* the index into DBTable.  Speeds up finding things.                   */
@@ -767,10 +779,7 @@ void DBInit()
 
         /* Open database file */
         printf("... using database DB6\n");
-/*
         DBFile = open( "DB6", O_BINARY|O_RDONLY);
-*/
-        DBFile = open( "DataBases/8.44/DB8.00", 0 );
         if( DBFile == 0 )
         {
                 printf("Cannot open DB6\n");
@@ -844,7 +853,7 @@ void DBInit()
 
                 /* Read index file and build table */
                 dbidx = -1;
-                dbifp = fopen("DataBases/8.44/DB8.00.idx", "r");
+                dbifp = fopen("DB6.idx", "r");
                 if (dbifp == NULL)
                 {
                         printf("ERROR: cannot open DB6.idx\n");
@@ -1020,15 +1029,14 @@ long DBLookup()
         long result, diff, back, fwd, use;
         unsigned long index, cindex, c;
         DBENTRYPTR dbentry;
-        long start, end, middle, byte, i, def;
+        long start, end, middle, byte, def;
         unsigned char *buffer;
         long *dbindex;
-        long startx, endx, inc;
         short int *dbbufptr;
-        int cx;
+        int cx, i;
 
         /* Find out its index */
-        index = dbLocbvToSubIdx(&dbentry);
+        index = dbLocbvToSubIdx( &dbentry );
 
         /* Check if we already know its value because the db is all one value */
         if ((long)index < 0) {
@@ -1463,8 +1471,8 @@ DB_REC_PTR_T dbCreate(PIECES)
 {								\
         nXX = 0;						\
         while (vec) {						\
-                NEXT_BIT( POS, vec );				\
-		XXpos[nXX] = POS;				\
+                NEXT_BIT( pos, vec );				\
+		XXpos[nXX] = pos;				\
                 vec ^= (unsigned long)(1L << XXpos[(nXX)++]);	\
         }							\
 }
@@ -1476,119 +1484,109 @@ DB_REC_PTR_T dbCreate(PIECES)
 /*
  * dbLocbvToSubIdx - Compute a position index
  */
-unsigned long dbLocbvToSubIdx(dbentry)
-        DBENTRYPTR *dbentry;
+
+unsigned long dbLocbvToSubIdx( DBENTRYPTR * dbentry )
 {
-        long            PIECES;
-        long            bppos[12], wppos[12];
-        long            bkpos[12], wkpos[12];
-        long            XXhits[12];
-        long            bpidx, wpidx, bkidx, wkidx, firstidx, i;
-        unsigned long   vec, Blackbv, Whitebv, Kingbv;
-        long            Index;
-	unsigned int	POS;
-        sidxindexptr    ptr;
-        DB_REC_PTR_T    db;
-        union {
-                unsigned long    U;
-                unsigned char C[4];
-        } a, b;
+	int		nbk, nwk, nbp, nwp, rankbp, rankwp;
+	int		bppos[MAX_PIECES], wppos[MAX_PIECES];
+	int		bkpos[MAX_PIECES], wkpos[MAX_PIECES];
+	int		XXhits[MAX_PIECES];
+	int		bpidx, wpidx, bkidx, wkidx, firstidx;
+	u_int		vec, Blackbv, Whitebv, Kingbv;
+	int		Index, pos;
+	unsigned      *	baseptr;
+	unsigned char *	indexptr;
+	DB_REC_PTR_T	db;
+	union {
+		u_int U;
+		u_char C[4];
+	} a, b;
 
-        /* If it's white to move, reverse the board & look up black to move. */
-        if (Turn == WHITE) {
-                a.U = Locbv[WHITE];
-                b.C[3] = ReverseByte[a.C[0]];
-                b.C[2] = ReverseByte[a.C[1]];
-                b.C[1] = ReverseByte[a.C[2]];
-                b.C[0] = ReverseByte[a.C[3]];
-                Blackbv = b.U;
-                a.U = Locbv[BLACK];
-                b.C[3] = ReverseByte[a.C[0]];
-                b.C[2] = ReverseByte[a.C[1]];
-                b.C[1] = ReverseByte[a.C[2]];
-                b.C[0] = ReverseByte[a.C[3]];
-                Whitebv = b.U;
-                a.U = Locbv[KINGS];
-                b.C[3] = ReverseByte[a.C[0]];
-                b.C[2] = ReverseByte[a.C[1]];
-                b.C[1] = ReverseByte[a.C[2]];
-                b.C[0] = ReverseByte[a.C[3]];
-                Kingbv = b.U;
-        }
-        else {
-                Blackbv = Locbv[BLACK];
-                Whitebv = Locbv[WHITE];
-                Kingbv = Locbv[KINGS];
-        }
+	/* If it's white to move, reverse the board & look up black to move. */
+	if (Turn == WHITE) {
+		a.U = Locbv[WHITE];
+		b.C[3] = ReverseByte[a.C[0]];
+		b.C[2] = ReverseByte[a.C[1]];
+		b.C[1] = ReverseByte[a.C[2]];
+		b.C[0] = ReverseByte[a.C[3]];
+		Blackbv = b.U;
+		a.U = Locbv[BLACK];
+		b.C[3] = ReverseByte[a.C[0]];
+		b.C[2] = ReverseByte[a.C[1]];
+		b.C[1] = ReverseByte[a.C[2]];
+		b.C[0] = ReverseByte[a.C[3]];
+		Whitebv = b.U;
+		a.U = Locbv[KINGS];
+		b.C[3] = ReverseByte[a.C[0]];
+		b.C[2] = ReverseByte[a.C[1]];
+		b.C[1] = ReverseByte[a.C[2]];
+		b.C[0] = ReverseByte[a.C[3]];
+		Kingbv = b.U;
+	}
+	else {
+		Blackbv = Locbv[BLACK];
+		Whitebv = Locbv[WHITE];
+		Kingbv = Locbv[KINGS];
+	}
 
-        /* Extract and sort the black checkers */
-        vec = RotateBoard(Blackbv & ~ Kingbv);
-        EXTRACT_PIECES(vec, nbp, bppos); 
-        SquishBP(nbp, bppos);
+	/* Extract and sort the black pawns */
+	vec = RotateBoard(Blackbv & ~ Kingbv);
+	EXTRACT_PIECES(vec, nbp, bppos);
+	SquishBP(nbp, bppos);
 
-        /* Extract and sort the white checkers */
-        vec = RotateBoard(Whitebv & ~ Kingbv);
-        EXTRACT_PIECES(vec, nwp, wppos);
-        SquishWP(nwp, nbp, wppos, bppos);
+	/* Extract and sort the white pawns */
+	vec = RotateBoard(Whitebv & ~ Kingbv);
+	EXTRACT_PIECES(vec, nwp, wppos);
+	SquishWP(nwp, nbp, wppos, bppos);
 
-        /* Extract and sort the black kings */
-        vec = RotateBoard(Blackbv & Kingbv);
-        EXTRACT_PIECES(vec, nbk, bkpos);
-        SquishBK(nbk, nwp, nbp, bkpos, wppos, bppos);
+	/* Extract and sort the black kings */
+	vec = RotateBoard(Blackbv & Kingbv);
+	EXTRACT_PIECES(vec, nbk, bkpos);
+	SquishBK(nbk, nwp, nbp, bkpos, wppos, bppos);
 
-        /* Extract and sort the white kings */
-        vec = RotateBoard(Whitebv & Kingbv);
-        EXTRACT_PIECES(vec, nwk, wkpos);
-        SquishWK(nwk, nbk, nwp, nbp, wkpos, bkpos, wppos, bppos);
+	/* Extract and sort the white kings */
+	vec = RotateBoard(Whitebv & Kingbv);
+	EXTRACT_PIECES(vec, nwk, wkpos);
+	SquishWK(nwk, nbk, nwp, nbp, wkpos, bkpos, wppos, bppos);
 
-        /* Only consider positions where black dominates white */
-        *dbentry = DBTable[DBINDEX(nbk, nwk, nbp, nwp)];
-        if (*dbentry == 0) {
-                printf("ERROR: cannot happen!\n");
-                exit(-1);
-        }
-        if (nwp == 0)
-                *dbentry += rankbp;
-        else    *dbentry += (rankbp * 7 + rankwp);
-        if (*dbentry == NULL)
-                return((long) (DB_UNKNOWN - 1));
+	/* Only consider positions where black dominates white */
+	*dbentry = DBTable[ DBINDEX( nbk, nwk, nbp, nwp ) ];
+	if( *dbentry == 0 )
+	{
+		printf( "ERROR: cannot happen!\n" );
+		exit( -1 );
+	}
+	if( nwp == 0 )
+		*dbentry += rankbp;
+	else	*dbentry += ( rankbp * 7 + rankwp );
+	if( *dbentry == NULL )
+		return( (unsigned) (DB_UNKNOWN - 1) );
 
-        if ((*dbentry)->value != UNKNOWN)
-                return(-((*dbentry)->value + 1));
+	if( (*dbentry)->value != UNKNOWN )
+		return( (unsigned) -( (*dbentry)->value + 1 ) );
 
-        /* Determine wpidx, then combine bp & wp indices into bpidx. */
-        db    = (*dbentry)->db;
-        if (db == NULL)
-                return((long)(DB_UNKNOWN - 1));
+	/* Determine wpidx, then combine bp & wp indices into bpidx. */
+	db    = (*dbentry)->db;
+	if( db == NULL )
+		return( (unsigned) (DB_UNKNOWN - 1) );
 
-        ptr = db->dbptr;
-        bpidx -= db->firstBPIdx;        /* get matching index number */
+	baseptr  = db->sidxbase;
+	indexptr = db->sidxindex;
+	bpidx -= db->firstBPIdx;
 
-        /*
-         * Compute the position index by:
-         *
-         * Index = (BASE * rangeBK * rangeWK) +                 (1)
-         *         ((wpidx - FIRST) * rangeBK * rangeWK) +      (2)
-         *         (bkidx * rangeWK) +                          (3)
-         *          wkidx                                       (4)
-         *
-         * where:
-         *       (1) is the number of positions with the black checker index
-         *           less than the desired black checker index
-         *       (2) is the number of positions with the desired black checker
-         *           index but having a white checker index less than the
-         *           desired white checker index
-         *       (3) is the number of positions with the desired black and
-         *           white checker index but having a black king index less
-         *           than the desired black king index
-         *       (4) is the number of positions with the desired black checker,
-         *           white checker, and black king index but having a white
-         *           king index less than the desired white king index
-         */
-        firstidx = Choose((ptr[bpidx].sidxindex >> 3), (ptr[bpidx].sidxindex & 07));
-        bpidx = ptr[bpidx].sidxbase + wpidx - firstidx;
-        Index = (((bpidx * db->rangeBK) + bkidx) * db->rangeWK) + wkidx;
-        return(Index);
+	/*
+	 * Compute the position index by:
+	 *
+	 * Index = (BASE * rangeBK * rangeWK) +			# BP positions
+	 *	   ((wpidx - FIRST) * rangeBK * rangeWK) +	# WP positions
+	 *	   (bkidx * rangeWK) +				# BK positions
+	 *	    wkidx					# WK positions
+	 */
+	firstidx = Choose( ( indexptr[bpidx] >> 3 ),
+			   ( indexptr[bpidx] & 07 ) );
+	bpidx = baseptr[bpidx] + wpidx - firstidx;
+	Index = (((bpidx * db->rangeBK) + bkidx) * db->rangeWK) + wkidx;
+	return(Index);
 
 } /* dbLocbvToSubIdx() */
 
@@ -1662,7 +1660,8 @@ sidxCreate(p, nBP, nWP, rankBPL, rankWPL, numPos, firstBPLIdx, nextBPLIdx)
         long *numPos, *firstBPLIdx, *nextBPLIdx; /* VAR parameters */
 {
         unsigned long firstWPLIdx, nextWPLIdx, Base;
-        sidxindexptr ptr;
+	unsigned * baseptr;
+        unsigned char  * indexptr;
         unsigned long Maximum;
         long nsqr1, nsqr2;
         long fsq, fpc;
@@ -1695,9 +1694,12 @@ sidxCreate(p, nBP, nWP, rankBPL, rankWPL, numPos, firstBPLIdx, nextBPLIdx)
          * cumulative number of white checker positions for each black
          * checker configuration.
          */
-        p->dbptr = ptr = (sidxindexptr) malloc (
-                (unsigned long) (1 + *nextBPLIdx - *firstBPLIdx) *
-                (unsigned long) sizeof(unsigned long));
+        p->sidxbase = baseptr = (unsigned *) malloc (
+                (unsigned) (1 + *nextBPLIdx - *firstBPLIdx) *
+                (unsigned) sizeof( unsigned ) );
+	p->sidxindex = indexptr = (unsigned char *) malloc(
+                (unsigned) (1 + *nextBPLIdx - *firstBPLIdx) *
+                (unsigned) sizeof( unsigned char ) );
 
         /*
          * This array holds the starting index for each white checker
@@ -1709,9 +1711,9 @@ sidxCreate(p, nBP, nWP, rankBPL, rankWPL, numPos, firstBPLIdx, nextBPLIdx)
         Base = 0;
         if (nWP == 0) {
                 firstWPLIdx = 0;
-                nextWPLIdx  = 1;
                 fsq = 0;
-                fpc = BICOEF;
+                fpc = BICOEF - 1;
+                nextWPLIdx  = 1;
         }
         if (nBP) {
                 SaveIndex(BPBOARD);
@@ -1747,9 +1749,10 @@ sidxCreate(p, nBP, nWP, rankBPL, rankWPL, numPos, firstBPLIdx, nextBPLIdx)
                 }
 
                 /* store these values for future reference */
-                ptr->sidxbase = Base;
-                ptr->sidxindex = ( fsq << 3 ) | fpc;
-                ptr++;
+                *baseptr = Base;
+                *indexptr = ( fsq << 3 ) | fpc;
+                 baseptr++;
+	 	 indexptr++;
 
                 /*
                  * Add the number of white checker positions to the cumulative
@@ -1950,3 +1953,4 @@ DBindex(pos, k)
                 offset += Choose(*pos--, k--);
         return(offset);
 }
+
